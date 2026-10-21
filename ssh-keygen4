@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#
+# ssh-keygen4 — create a dedicated SSH key + ~/.ssh/config host alias for a repo.
+#
+# Usage:
+#   ssh-keygen4 https://github.com/M507/ssh-keygen4
+#   ssh-keygen4 git@github.com:M507/ssh-keygen4.git
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $(basename "$0") <repo-url>" >&2
+  echo "  e.g. https://github.com/M507/ssh-keygen4" >&2
+  echo "       git@github.com:M507/ssh-keygen4.git" >&2
+  exit 1
+fi
+
+command -v ssh-keygen >/dev/null 2>&1 || { echo "Error: ssh-keygen is not installed" >&2; exit 1; }
+
+url="$1"
+
+# --- Extract the repo name from the URL ---
+url="${url%/}"          # strip trailing slash
+name="${url##*/}"       # everything after the last '/'
+name="${name##*:}"      # everything after the last ':' (scp-like syntax)
+name="${name%.git}"     # strip .git suffix
+
+if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Error: could not parse a valid repo name out of: $1" >&2
+  exit 1
+fi
+
+# --- Pick a key file name, counting up on duplicates ---
+ssh_dir="$HOME/.ssh"
+mkdir -p "$ssh_dir"
+chmod 700 "$ssh_dir"
+
+key="$name"
+i=1
+while [[ -e "$ssh_dir/$key" || -e "$ssh_dir/$key.pub" ]]; do
+  key="${name}-$((i++))"
+done
+
+# --- Generate the key ---
+ssh-keygen -t ed25519 -N "" -C "$key" -f "$ssh_dir/$key" -q
+chmod 600 "$ssh_dir/$key"
+chmod 644 "$ssh_dir/$key.pub"
+
+# --- Append the config block ---
+config="$ssh_dir/config"
+touch "$config"
+chmod 600 "$config"
+
+# blank line separator if the file already has content
+[[ -s "$config" ]] && echo >> "$config"
+
+cat >> "$config" <<EOF
+Host ${key}-github.com
+  HostName github.com
+  IdentityFile ~/.ssh/${key}
+  User git
+  IdentitiesOnly yes
+EOF
+
+# --- Summary ---
+echo "Created key:   $ssh_dir/$key"
+echo "Public key:    $ssh_dir/$key.pub"
+echo "Config host:   ${key}-github.com"
+
+# --- Work out the SSH clone URL (owner/repo) ---
+owner_repo=""
+case "$url" in
+  git@*)  owner_repo="${url#*:}" ;;
+  *://*)  owner_repo="${url#*://}"; owner_repo="${owner_repo#*/}" ;;
+esac
+owner_repo="${owner_repo%.git}"
+
+echo
+echo "Add this public key to GitHub (repo -> Settings -> Deploy keys):"
+echo
+cat "$ssh_dir/$key.pub"
+echo
+
+if [[ -z "$owner_repo" ]]; then
+  exit 0
+fi
+
+# --- Prompt and clone ---
+clone_url="git@${key}-github.com:${owner_repo}.git"
+
+ans=""
+read -r -p "Have you added the key to your private repo? [y/N] " ans || true
+
+case "$ans" in
+  [yY]|[yY][eE][sS])
+    command -v git >/dev/null 2>&1 || { echo "Error: git is not installed" >&2; exit 1; }
+    # Pick a target folder in the current dir, counting up on collisions
+    # (same rule as the key names) so we never fail on an existing file/dir.
+    target="$name"
+    i=1
+    while [[ -e "$target" ]]; do
+      target="${name}-$((i++))"
+    done
+    echo "Cloning into $(pwd)/$target ..."
+    git clone "$clone_url" "$target"
+    ;;
+  *)
+    echo "Skipping clone. When ready, run:"
+    echo "  git clone $clone_url"
+    ;;
+esac
